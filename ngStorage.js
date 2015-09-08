@@ -12,8 +12,8 @@
 }(this , function (angular) {
     'use strict';
 
-    // In cases where Angular does not get passed or angular is a truthy value
-    // but misses .module we can fall back to using window.
+    // RequireJS does not pass in Angular to us (will be undefined).
+    // Fallback to window which should mostly be there.
     angular = (angular && angular.module ) ? angular : window.angular;
 
     /**
@@ -131,12 +131,15 @@
                 // See https://github.com/gsklee/ngStorage/issues/137
                 var prefixLength = storageKeyPrefix.length;
 
+                //This is used to remove the watcher from $rootScope for performance if needed
+                var removeStorageWatcher;
+
                 // #9: Assign a placeholder object if Web Storage is unavailable to prevent breaking the entire AngularJS app
                 var webStorage = isStorageSupported(storageType) || ($log.warn('This browser does not support Web Storage!'), {setItem: angular.noop, getItem: angular.noop}),
                     $storage = {
                         $default: function(items) {
                             for (var k in items) {
-                                angular.isDefined($storage[k]) || ($storage[k] = angular.copy(items[k]) );
+                                angular.isDefined($storage[k]) || ($storage[k] = items[k]);
                             }
 
                             $storage.$sync();
@@ -156,26 +159,68 @@
                             }
                         },
                         $apply: function() {
-                            var temp$storage;
-
                             _debounce = null;
-
+                            console.time('ngStorage');
                             if (!angular.equals($storage, _last$storage)) {
-                                temp$storage = angular.copy(_last$storage);
-                                angular.forEach($storage, function(v, k) {
-                                    if (angular.isDefined(v) && '$' !== k[0]) {
-                                        webStorage.setItem(storageKeyPrefix + k, serializer(v));
-                                        delete temp$storage[k];
-                                    }
-                                });
-
-                                for (var k in temp$storage) {
-                                    webStorage.removeItem(storageKeyPrefix + k);
-                                }
-
-                                _last$storage = angular.copy($storage);
+                                $storage.$saveStorage();
                             }
+                          console.timeEnd('ngStorage');
+
                         },
+                        $watchStorage: function() {
+                          if(!removeStorageWatcher) {
+                            removeStorageWatcher = $rootScope.$watch(function() {
+                              _debounce || (_debounce = $timeout($storage.$apply, 100, false));
+                            });
+                          }
+                        },
+                        $stopWatchingStorage: function() {
+                          if(removeStorageWatcher) {
+                            removeStorageWatcher();
+                            removeStorageWatcher = null;
+                          }
+                        },
+                        $saveStorage: function() {
+                          var temp$storage = angular.copy(_last$storage);
+                          angular.forEach($storage, function(v, k) {
+                            if (angular.isDefined(v) && '$' !== k[0]) {
+                              webStorage.setItem(storageKeyPrefix + k, serializer(v));
+                              delete temp$storage[k];
+                            }
+                          });
+
+                          for (var k in temp$storage) {
+                            webStorage.removeItem(storageKeyPrefix + k);
+                          }
+
+                          _last$storage = angular.copy($storage);
+                        },
+                        //$set / $get / $remove avoid the cost of serializer on each get call, as they store into $storage as well
+                        //This allows for specific sets, this is utilized when there is no watcher
+                        $set: function(k, v, silent) {
+                          if(removeStorageWatcher) {
+                            $storage[k] = v;//the watcher will take over from here
+                          } else {
+                            webStorage.setItem(storageKeyPrefix + k, serializer(v));
+                            $storage[k] = v;
+                            _last$storage[k] = v;
+                          }
+                        },
+                        //This gets from the $session variable to not need serialization
+                        $get: function(k) {
+                          return $session[k];
+                        },
+                        //This deletes the values as they are to be removed
+                        $remove: function(k) {
+                          if(removeStorageWatcher) {
+                            delete $storage[k];//the watcher will take over from here
+                          } else {
+                            webStorage.removeItem(storageKeyPrefix + k);
+                            delete $storage[k];
+                            delete _last$storage[k];
+                          }
+
+                        }
                     },
                     _last$storage,
                     _debounce;
@@ -184,9 +229,8 @@
 
                 _last$storage = angular.copy($storage);
 
-                $rootScope.$watch(function() {
-                    _debounce || (_debounce = $timeout($storage.$apply, 100, false));
-                });
+                //watch the $storage object to listen for changes, and commit them to the webStorage
+                $storage.$watchStorage();
 
                 // #6: Use `$window.addEventListener` instead of `angular.element` to avoid the jQuery-specific `event.originalEvent`
                 $window.addEventListener && $window.addEventListener('storage', function(event) {
@@ -204,8 +248,8 @@
                 });
 
                 return $storage;
-              }
-          ];
+            }
+        ];
       };
     }
 
